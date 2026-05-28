@@ -182,8 +182,47 @@ CREATE TABLE IF NOT EXISTS pending_sender_approvals (
   display_name        TEXT,
   request_payload     JSONB NOT NULL,
   status              TEXT NOT NULL DEFAULT 'pending',
+  title               TEXT NOT NULL DEFAULT '',
+  options_json        JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   decided_at          TIMESTAMPTZ
+);
+
+-- Generic approval state. Used by install_packages, add_mcp_server,
+-- OneCLI credential approvals, etc. References to sessions are FK'd;
+-- references to config (agent_group_id) are plain TEXT because the
+-- agent group lives in a CRD in declarative mode.
+CREATE TABLE IF NOT EXISTS pending_approvals (
+  approval_id         TEXT PRIMARY KEY,
+  session_id          TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  request_id          TEXT NOT NULL,
+  action              TEXT NOT NULL,
+  payload             JSONB NOT NULL,
+  agent_group_id      TEXT,
+  channel_type        TEXT,
+  platform_id         TEXT,
+  platform_message_id TEXT,
+  expires_at          TIMESTAMPTZ,
+  status              TEXT NOT NULL DEFAULT 'pending',
+  title               TEXT NOT NULL DEFAULT '',
+  options_json        JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_action_status
+  ON pending_approvals(action, status);
+
+-- Unknown-channel registration: an unwired channel that received a
+-- mention or DM, awaiting owner approval before being wired to an
+-- agent. PRIMARY KEY on messaging_group_id is the dedup mechanism —
+-- a second mention while a card is pending is silently swallowed.
+CREATE TABLE IF NOT EXISTS pending_channel_approvals (
+  messaging_group_id   TEXT PRIMARY KEY,
+  agent_group_id       TEXT NOT NULL,
+  original_message     JSONB NOT NULL,
+  approver_user_id     TEXT NOT NULL,
+  title                TEXT NOT NULL DEFAULT '',
+  options_json         JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS user_dms (

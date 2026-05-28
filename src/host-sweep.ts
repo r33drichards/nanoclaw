@@ -55,13 +55,7 @@ import {
 } from './db/session-db.js';
 import { getActiveSessions } from './db/sessions.js';
 import { log } from './log.js';
-import {
-  heartbeatPath,
-  inboundDbPath,
-  openInboundDb,
-  openOutboundDb,
-  openOutboundDbRw,
-} from './session-manager.js';
+import { heartbeatPath, inboundDbPath, openInboundDb, openOutboundDb, openOutboundDbRw } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
 

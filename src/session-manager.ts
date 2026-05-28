@@ -18,6 +18,8 @@ import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
+import { isPostgres } from './db/backend.js';
+import { insertInboundMessage, upsertSessionRouting as upsertSessionRoutingPg } from './db/messages-in-host-pg.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
@@ -153,10 +155,7 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
  * writeDestinations() (when installed) so the latest routing is always in
  * place, including after admin rewiring.
  */
-export function writeSessionRouting(agentGroupId: string, sessionId: string): void {
-  const dbPath = inboundDbPath(agentGroupId, sessionId);
-  if (!fs.existsSync(dbPath)) return;
-
+export async function writeSessionRouting(agentGroupId: string, sessionId: string): Promise<void> {
   const session = getSession(sessionId);
   if (!session) return;
 
@@ -169,6 +168,19 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
       platformId = mg.platform_id;
     }
   }
+
+  if (isPostgres()) {
+    await upsertSessionRoutingPg(sessionId, {
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: session.thread_id,
+    });
+    log.debug('Session routing written (pg)', { sessionId, channelType, platformId, threadId: session.thread_id });
+    return;
+  }
+
+  const dbPath = inboundDbPath(agentGroupId, sessionId);
+  if (!fs.existsSync(dbPath)) return;
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
@@ -190,7 +202,17 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
  * long-lived connection — see the "Cross-mount visibility invariants" note
  * at the top of this file.
  */
-export function writeSessionMessage(
+/**
+ * Insert an inbound message for the agent.
+ *
+ * Returns a Promise so the Postgres backend can run async — the SQLite
+ * backend resolves synchronously. Callers in async contexts simply
+ * `await`; the few sync callers that remain wrap the call in
+ * `void writeSessionMessage(...)` and accept fire-and-forget
+ * semantics (they were already non-blocking on durability grounds, see
+ * router.ts inline comments).
+ */
+export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
   message: {
@@ -222,9 +244,28 @@ export function writeSessionMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
+): Promise<void> {
   // Extract base64 attachment data, save to inbox, replace with file paths
   const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
+
+  if (isPostgres()) {
+    await insertInboundMessage(sessionId, {
+      id: message.id,
+      kind: message.kind,
+      timestamp: message.timestamp,
+      platform_id: message.platformId ?? null,
+      channel_type: message.channelType ?? null,
+      thread_id: message.threadId ?? null,
+      content,
+      process_after: message.processAfter ?? null,
+      recurrence: message.recurrence ?? null,
+      trigger: message.trigger ?? 1,
+      source_session_id: message.sourceSessionId ?? null,
+      on_wake: (message.onWake ?? 0) === 1,
+    });
+    updateSession(sessionId, { last_active: new Date().toISOString() });
+    return;
+  }
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {

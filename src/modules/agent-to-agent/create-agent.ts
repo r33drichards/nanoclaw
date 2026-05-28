@@ -18,8 +18,8 @@ import type { AgentGroup, Session } from '../../types.js';
 import { createDestination, getDestinationByName, normalizeName } from './db/agent-destinations.js';
 import { writeDestinations } from './write-destinations.js';
 
-function notifyAgent(session: Session, text: string): void {
-  writeSessionMessage(session.agent_group_id, session.id, {
+async function notifyAgent(session: Session, text: string): Promise<void> {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
@@ -41,7 +41,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
 
   const sourceGroup = getAgentGroup(session.agent_group_id);
   if (!sourceGroup) {
-    notifyAgent(session, `create_agent failed: source agent group not found.`);
+    await notifyAgent(session, `create_agent failed: source agent group not found.`);
     log.warn('create_agent failed: missing source group', { sessionAgentGroup: session.agent_group_id, name });
     return;
   }
@@ -50,7 +50,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
 
   // Collision in the creator's destination namespace
   if (getDestinationByName(sourceGroup.id, localName)) {
-    notifyAgent(session, `Cannot create agent "${name}": you already have a destination named "${localName}".`);
+    await notifyAgent(session, `Cannot create agent "${name}": you already have a destination named "${localName}".`);
     return;
   }
 
@@ -66,7 +66,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
   const resolvedPath = path.resolve(groupPath);
   const resolvedGroupsDir = path.resolve(GROUPS_DIR);
   if (!resolvedPath.startsWith(resolvedGroupsDir + path.sep)) {
-    notifyAgent(session, `Cannot create agent "${name}": invalid folder path.`);
+    await notifyAgent(session, `Cannot create agent "${name}": invalid folder path.`);
     log.error('create_agent path traversal attempt', { folder, resolvedPath });
     return;
   }
@@ -115,8 +115,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
   // tries to send to the newly-created child.
   writeDestinations(session.agent_group_id, session.id);
 
-  // Fire-and-forget notification back to the creator
-  notifyAgent(
+  await notifyAgent(
     session,
     `Agent "${localName}" created. You can now message it with <message to="${localName}">...</message>.`,
   );

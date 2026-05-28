@@ -1,0 +1,22 @@
+apiVersion: v2
+name: nanoclaw
+description: |
+  NanoClaw — personal Claude assistant on Kubernetes.
+
+  Declarative mode: per-session pods are managed by kubernetes-sigs/agent-sandbox,
+  config lives in NanoClaw CRDs (NanoAgent, NanoMessagingGroup, NanoWiring), and
+  runtime state lives in a CloudNativePG-managed Postgres cluster.
+
+  Prerequisites (operator installs separately before this chart):
+    - kubernetes-sigs/agent-sandbox CRDs + controller
+    - cloudnative-pg operator
+type: application
+version: 0.1.0
+appVersion: "2.0.70"
+keywords:
+  - claude
+  - agent
+  - assistant
+  - kubernetes
+sources:
+  - https://github.com/r33drichards/nanoclaw

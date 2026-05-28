@@ -1,0 +1,128 @@
+# NanoClaw declarative-mode values.
+# See deploy/crds/ for the CRDs that operators create after install.
+
+# ────────────────────────────────────────────────────────────────────────
+# Container images
+# ────────────────────────────────────────────────────────────────────────
+images:
+  host:
+    repository: ghcr.io/r33drichards/nanoclaw-host
+    tag: "2.0.70"
+    pullPolicy: IfNotPresent
+  controller:
+    repository: ghcr.io/r33drichards/nanoclaw-controller
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  agent:
+    # Default per-session Sandbox image. Per-agent overrides via
+    # NanoAgent.spec.imageTag.
+    repository: ghcr.io/r33drichards/nanoclaw-agent
+    tag: "2.0.70"
+    pullPolicy: IfNotPresent
+  onecli:
+    repository: ghcr.io/onecli-sh/onecli
+    tag: "1.3.0"
+    pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ────────────────────────────────────────────────────────────────────────
+# Host (channel adapters + delivery + sweep)
+# ────────────────────────────────────────────────────────────────────────
+host:
+  replicas: 1                   # SINGLETON — channel adapters assume one process.
+  strategy:
+    type: Recreate
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  env:
+    ASSISTANT_NAME: NanoClaw
+    NANOCLAW_DB_BACKEND: postgres
+    NANOCLAW_CONFIG_SOURCE: crd
+    TZ: UTC
+  # Channel credentials populated via this Secret (referenced by env-from).
+  channelSecretRef: nanoclaw-channels
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 8080
+    initialDelaySeconds: 15
+    periodSeconds: 30
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+# ────────────────────────────────────────────────────────────────────────
+# Controller (CRD → SandboxTemplate / SandboxClaim reconciler)
+# ────────────────────────────────────────────────────────────────────────
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  # Default network policy template the controller stamps onto each
+  # SandboxTemplate. NanoAgent.spec.allowedEgress extends this allow-list.
+  networkPolicy:
+    managed: true
+    allowOneCli: true
+    allowPostgres: true
+
+# ────────────────────────────────────────────────────────────────────────
+# Postgres (CloudNativePG Cluster)
+# ────────────────────────────────────────────────────────────────────────
+postgres:
+  # external: { host, port, database, secretName } — bypass CNPG and point
+  # at managed Postgres (RDS / Cloud SQL / Azure DB). When set, the chart
+  # does not create a CNPG Cluster resource.
+  external: {}
+  cluster:
+    name: nanoclaw-pg
+    instances: 3
+    storage:
+      size: 20Gi
+      storageClass: ""
+    postgresql:
+      parameters:
+        max_connections: "500"
+        shared_buffers: "256MB"
+    bootstrap:
+      initdb:
+        database: nanoclaw
+        owner: nanoclaw_host
+    monitoring:
+      enabled: true
+
+# ────────────────────────────────────────────────────────────────────────
+# OneCLI credential gateway
+# ────────────────────────────────────────────────────────────────────────
+onecli:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  storage:
+    size: 5Gi
+    storageClass: ""
+  service:
+    port: 8080
+
+# ────────────────────────────────────────────────────────────────────────
+# RBAC
+# ────────────────────────────────────────────────────────────────────────
+rbac:
+  create: true
+serviceAccount:
+  hostName: nanoclaw-host
+  controllerName: nanoclaw-controller

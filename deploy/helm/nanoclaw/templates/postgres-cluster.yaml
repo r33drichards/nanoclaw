@@ -1,0 +1,55 @@
+{{- if not .Values.postgres.external.host }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Values.postgres.cluster.name }}
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.postgres.cluster.instances }}
+  storage:
+    size: {{ .Values.postgres.cluster.storage.size }}
+    {{- with .Values.postgres.cluster.storage.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
+  postgresql:
+    parameters:
+      {{- toYaml .Values.postgres.cluster.postgresql.parameters | nindent 6 }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.postgres.cluster.bootstrap.initdb.database }}
+      owner: {{ .Values.postgres.cluster.bootstrap.initdb.owner }}
+      # Schema init runs as a post-init SQL list. CNPG executes these
+      # against the just-created database with superuser before the cluster
+      # opens for application traffic.
+      postInitApplicationSQLRefs:
+        configMapRefs:
+          - name: {{ .Release.Name }}-pg-init
+            key: 00-roles.sql
+          - name: {{ .Release.Name }}-pg-init
+            key: 10-schema.sql
+          - name: {{ .Release.Name }}-pg-init
+            key: 20-triggers.sql
+          - name: {{ .Release.Name }}-pg-init
+            key: 30-grants.sql
+  monitoring:
+    enablePodMonitor: {{ .Values.postgres.cluster.monitoring.enabled }}
+---
+# SQL bootstrap files projected via ConfigMap. Helm copies the files at
+# package time so the chart is self-contained.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-pg-init
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+data:
+  00-roles.sql: |
+{{ .Files.Get "files/postgres/00-roles.sql" | indent 4 }}
+  10-schema.sql: |
+{{ .Files.Get "files/postgres/10-schema.sql" | indent 4 }}
+  20-triggers.sql: |
+{{ .Files.Get "files/postgres/20-triggers.sql" | indent 4 }}
+  30-grants.sql: |
+{{ .Files.Get "files/postgres/30-grants.sql" | indent 4 }}
+{{- end }}

@@ -1,0 +1,72 @@
+{{- if .Values.onecli.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-onecli
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: onecli
+spec:
+  replicas: {{ .Values.onecli.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "nanoclaw.onecli.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nanoclaw.onecli.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: onecli
+          image: "{{ .Values.images.onecli.repository }}:{{ .Values.images.onecli.tag }}"
+          imagePullPolicy: {{ .Values.images.onecli.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            {{- toYaml .Values.onecli.resources | nindent 12 }}
+          volumeMounts:
+            - name: vault
+              mountPath: /var/lib/onecli
+      volumes:
+        - name: vault
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-onecli
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-onecli
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.onecli.storage.size }}
+  {{- with .Values.onecli.storage.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-onecli
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: onecli
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "nanoclaw.onecli.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.onecli.service.port }}
+      targetPort: http
+{{- end }}

@@ -1,0 +1,148 @@
+{{- if .Values.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.hostName }}
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.controllerName }}
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+---
+# Host: read CRDs (config), write NanoSession + NanoApproval status,
+# observe SandboxClaim status. Host does NOT create Sandboxes — that's
+# the controller's job.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-host
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["nanoclaw.io"]
+    resources:
+      - nanoagents
+      - nanomessaginggroups
+      - nanowirings
+    verbs: [get, list, watch]
+  - apiGroups: ["nanoclaw.io"]
+    resources:
+      - nanosessions
+      - nanoapprovals
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["nanoclaw.io"]
+    resources:
+      - nanosessions/status
+      - nanoapprovals/status
+      - nanomessaginggroups/status
+    verbs: [get, update, patch]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: [sandboxes]
+    verbs: [get, list, watch]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: [sandboxclaims]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-host
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.hostName }}
+roleRef:
+  kind: Role
+  name: {{ .Release.Name }}-host
+  apiGroup: rbac.authorization.k8s.io
+---
+# Controller: full reconciliation power over NanoClaw CRDs and the
+# agent-sandbox resources it materializes from them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-controller
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["nanoclaw.io"]
+    resources:
+      - nanoagents
+      - nanoagents/status
+      - nanomessaginggroups
+      - nanowirings
+      - nanosessions
+      - nanosessions/status
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources:
+      - sandboxtemplates
+      - sandboxclaims
+      - sandboxwarmpools
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: [sandboxes]
+    verbs: [get, list, watch]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps, secrets, services]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  # Leader election lease
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-controller
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.controllerName }}
+roleRef:
+  kind: Role
+  name: {{ .Release.Name }}-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+# Cluster-scoped read of NanoUser (CRD is cluster-scoped).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-nanousers-reader
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["nanoclaw.io"]
+    resources: [nanousers]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-nanousers-reader
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.hostName }}
+    namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.controllerName }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-nanousers-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

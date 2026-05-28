@@ -9,17 +9,24 @@
  */
 import type Database from 'better-sqlite3';
 
-import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { isPostgres } from './db/backend.js';
 import { getDb, hasTable } from './db/connection.js';
+import { markDelivered as markDeliveredPg } from './db/messages-in-host-pg.js';
+import {
+  clearOutboundAttachments,
+  getDueOutboundMessages as getDueOutboundMessagesPg,
+  getOutboundAttachments,
+} from './db/messages-out-host-pg.js';
 import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
-  getDueOutboundMessages,
   getDeliveredIds,
+  getDueOutboundMessages,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
 } from './db/session-db.js';
+import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
@@ -165,6 +172,11 @@ async function drainSession(session: Session): Promise<void> {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
+  if (isPostgres()) {
+    await drainSessionPg(session);
+    return;
+  }
+
   let outDb: Database.Database;
   let inDb: Database.Database;
   try {
@@ -229,6 +241,144 @@ async function drainSession(session: Session): Promise<void> {
     outDb.close();
     inDb.close();
   }
+}
+
+async function drainSessionPg(session: Session): Promise<void> {
+  // Pull due, not-yet-delivered messages_out rows. The SQL already joins
+  // against `delivered` so we don't need a second filter pass.
+  const allDue = await getDueOutboundMessagesPg(session.id);
+  if (allDue.length === 0) return;
+
+  for (const msg of allDue) {
+    try {
+      const platformMsgId = await deliverMessagePg(msg, session);
+      await markDeliveredPg(session.id, msg.id, platformMsgId ?? null);
+      deliveryAttempts.delete(msg.id);
+
+      if (msg.kind !== 'system' && msg.channel_type !== 'agent') {
+        pauseTypingRefreshAfterDelivery(session.id);
+      }
+    } catch (err) {
+      const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
+      deliveryAttempts.set(msg.id, attempts);
+      if (attempts >= MAX_DELIVERY_ATTEMPTS) {
+        log.error('Message delivery failed permanently, giving up', {
+          messageId: msg.id,
+          sessionId: session.id,
+          attempts,
+          err,
+        });
+        // PG path uses status='failed' on the delivered row instead of a
+        // separate markDeliveryFailed table mutation.
+        await markDeliveredPg(session.id, msg.id, null, 'failed');
+        deliveryAttempts.delete(msg.id);
+      } else {
+        log.warn('Message delivery failed, will retry', {
+          messageId: msg.id,
+          sessionId: session.id,
+          attempt: attempts,
+          maxAttempts: MAX_DELIVERY_ATTEMPTS,
+          err,
+        });
+      }
+    }
+  }
+}
+
+async function deliverMessagePg(
+  msg: {
+    id: string;
+    kind: string;
+    platform_id: string | null;
+    channel_type: string | null;
+    thread_id: string | null;
+    content: string;
+    in_reply_to: string | null;
+  },
+  session: Session,
+): Promise<string | undefined> {
+  if (!deliveryAdapter) {
+    log.warn('No delivery adapter configured, dropping message', { id: msg.id });
+    return;
+  }
+
+  const content = JSON.parse(msg.content);
+
+  // System actions and agent-to-agent currently need a Database handle for
+  // their inDb writes. The PG ports of the scheduling + agent-to-agent
+  // modules are tracked follow-ups; until they land, surface the limitation
+  // instead of silently dropping work.
+  if (msg.kind === 'system') {
+    log.warn('System action in PG mode not yet supported — skipping', {
+      id: msg.id,
+      sessionId: session.id,
+    });
+    return;
+  }
+  if (msg.channel_type === 'agent') {
+    log.warn('Agent-to-agent routing in PG mode not yet supported — skipping', {
+      id: msg.id,
+      sessionId: session.id,
+    });
+    return;
+  }
+
+  // Pending questions: createPendingQuestion already routes via the
+  // backend-aware sessions accessor (sessions-pg.ts uses pg, sessions.ts
+  // uses SQLite). Safe to call from either path.
+  if (content.type === 'ask_question' && content.questionId) {
+    const title = content.title as string | undefined;
+    const rawOptions = content.options as unknown;
+    if (!title || !Array.isArray(rawOptions)) {
+      log.error('ask_question missing required title/options — not persisting', {
+        questionId: content.questionId,
+      });
+    } else {
+      createPendingQuestion({
+        question_id: content.questionId,
+        session_id: session.id,
+        message_out_id: msg.id,
+        platform_id: msg.platform_id,
+        channel_type: msg.channel_type,
+        thread_id: msg.thread_id,
+        title,
+        options: normalizeOptions(rawOptions as never),
+        created_at: new Date().toISOString(),
+      });
+    }
+  }
+
+  if (!msg.channel_type || !msg.platform_id) {
+    log.warn('Message missing routing fields', { id: msg.id });
+    return;
+  }
+
+  // Pull attachments from attachments_outbound and pass to the adapter.
+  let files: OutboundFile[] | undefined;
+  if (Array.isArray(content.files) && content.files.length > 0) {
+    files = await getOutboundAttachments(session.id, msg.id);
+  }
+
+  const platformMsgId = await deliveryAdapter.deliver(
+    msg.channel_type,
+    msg.platform_id,
+    msg.thread_id,
+    msg.kind,
+    msg.content,
+    files,
+  );
+  log.info('Message delivered', {
+    id: msg.id,
+    channelType: msg.channel_type,
+    platformId: msg.platform_id,
+    platformMsgId,
+    fileCount: files?.length,
+  });
+
+  // Clean up attachments_outbound now that the bytes shipped.
+  await clearOutboundAttachments(session.id, msg.id);
+
+  return platformMsgId;
 }
 
 async function deliverMessage(

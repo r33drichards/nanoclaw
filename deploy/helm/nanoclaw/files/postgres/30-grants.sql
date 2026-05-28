@@ -48,6 +48,13 @@ GRANT SELECT ON
   attachments_outbound
 TO nanoclaw_host;
 
+-- Narrow exception: the command-gate denial path needs to inject a
+-- pre-formed reply into messages_out without waking a container. The
+-- host writes one synthetic row with kind='chat' and the outbound poll
+-- picks it up. Agent remains the steady-state writer; this is a write
+-- only when the container is stopped. See session-manager.writeOutboundDirect.
+GRANT INSERT ON messages_out TO nanoclaw_host;
+
 -- Sequence (BIGSERIAL columns)
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO nanoclaw_host;
 

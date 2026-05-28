@@ -1,3 +1,4 @@
+import { getMessagingGroupInformer, getWiringInformer, projectMessagingGroup, projectWiring } from '../crds/index.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../types.js';
 // Transitional tier violation: core imports from optional agent-to-agent module.
 // `createMessagingGroupAgent` auto-creates a destination row on wiring — the
@@ -14,11 +15,16 @@ import {
   getDestinationByTarget,
   normalizeName,
 } from '../modules/agent-to-agent/db/agent-destinations.js';
+
+import { isCrdConfig } from './backend.js';
 import { getDb, hasTable } from './connection.js';
 
 // ── Messaging Groups ──
 
 export function createMessagingGroup(group: MessagingGroup): void {
+  if (isCrdConfig()) {
+    throw new Error('Messaging groups are immutable in CRD mode. Create a NanoMessagingGroup CR instead.');
+  }
   getDb()
     .prepare(
       `INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
@@ -28,10 +34,20 @@ export function createMessagingGroup(group: MessagingGroup): void {
 }
 
 export function getMessagingGroup(id: string): MessagingGroup | undefined {
+  if (isCrdConfig()) {
+    const cr = getMessagingGroupInformer().get(id);
+    return cr ? projectMessagingGroup(cr) : undefined;
+  }
   return getDb().prepare('SELECT * FROM messaging_groups WHERE id = ?').get(id) as MessagingGroup | undefined;
 }
 
 export function getMessagingGroupByPlatform(channelType: string, platformId: string): MessagingGroup | undefined {
+  if (isCrdConfig()) {
+    return getMessagingGroupInformer()
+      .list()
+      .map(projectMessagingGroup)
+      .find((mg) => mg.channel_type === channelType && mg.platform_id === platformId);
+  }
   return getDb()
     .prepare('SELECT * FROM messaging_groups WHERE channel_type = ? AND platform_id = ?')
     .get(channelType, platformId) as MessagingGroup | undefined;
@@ -54,6 +70,14 @@ export function getMessagingGroupWithAgentCount(
   channelType: string,
   platformId: string,
 ): { mg: MessagingGroup; agentCount: number } | null {
+  if (isCrdConfig()) {
+    const mg = getMessagingGroupByPlatform(channelType, platformId);
+    if (!mg) return null;
+    const agentCount = getWiringInformer()
+      .list()
+      .filter((w) => w.spec?.messagingGroupRef === mg.id).length;
+    return { mg, agentCount };
+  }
   const row = getDb()
     .prepare(
       `SELECT mg.*, COUNT(mga.id) AS agent_count
@@ -69,10 +93,22 @@ export function getMessagingGroupWithAgentCount(
 }
 
 export function getAllMessagingGroups(): MessagingGroup[] {
+  if (isCrdConfig()) {
+    return getMessagingGroupInformer()
+      .list()
+      .map(projectMessagingGroup)
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  }
   return getDb().prepare('SELECT * FROM messaging_groups ORDER BY name').all() as MessagingGroup[];
 }
 
 export function getMessagingGroupsByChannel(channelType: string): MessagingGroup[] {
+  if (isCrdConfig()) {
+    return getMessagingGroupInformer()
+      .list()
+      .map(projectMessagingGroup)
+      .filter((mg) => mg.channel_type === channelType);
+  }
   return getDb().prepare('SELECT * FROM messaging_groups WHERE channel_type = ?').all(channelType) as MessagingGroup[];
 }
 
@@ -191,6 +227,13 @@ export function createMessagingGroupAgent(mga: MessagingGroupAgent): void {
 }
 
 export function getMessagingGroupAgents(messagingGroupId: string): MessagingGroupAgent[] {
+  if (isCrdConfig()) {
+    return getWiringInformer()
+      .list()
+      .filter((w) => w.spec?.messagingGroupRef === messagingGroupId)
+      .map(projectWiring)
+      .sort((a, b) => b.priority - a.priority);
+  }
   return getDb()
     .prepare('SELECT * FROM messaging_group_agents WHERE messaging_group_id = ? ORDER BY priority DESC')
     .all(messagingGroupId) as MessagingGroupAgent[];
@@ -200,12 +243,22 @@ export function getMessagingGroupAgentByPair(
   messagingGroupId: string,
   agentGroupId: string,
 ): MessagingGroupAgent | undefined {
+  if (isCrdConfig()) {
+    const w = getWiringInformer()
+      .list()
+      .find((x) => x.spec?.messagingGroupRef === messagingGroupId && x.spec?.agentRef === agentGroupId);
+    return w ? projectWiring(w) : undefined;
+  }
   return getDb()
     .prepare('SELECT * FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?')
     .get(messagingGroupId, agentGroupId) as MessagingGroupAgent | undefined;
 }
 
 export function getMessagingGroupAgent(id: string): MessagingGroupAgent | undefined {
+  if (isCrdConfig()) {
+    const w = getWiringInformer().get(id);
+    return w ? projectWiring(w) : undefined;
+  }
   return getDb().prepare('SELECT * FROM messaging_group_agents WHERE id = ?').get(id) as
     | MessagingGroupAgent
     | undefined;
@@ -242,6 +295,18 @@ export function deleteMessagingGroupAgent(id: string): void {
 
 /** Get all messaging groups wired to an agent group (reverse lookup). */
 export function getMessagingGroupsByAgentGroup(agentGroupId: string): MessagingGroup[] {
+  if (isCrdConfig()) {
+    const ids = new Set(
+      getWiringInformer()
+        .list()
+        .filter((w) => w.spec?.agentRef === agentGroupId)
+        .map((w) => w.spec?.messagingGroupRef ?? ''),
+    );
+    return getMessagingGroupInformer()
+      .list()
+      .filter((m) => ids.has(m.metadata.name))
+      .map(projectMessagingGroup);
+  }
   return getDb()
     .prepare(
       `SELECT mg.* FROM messaging_groups mg

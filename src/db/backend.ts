@@ -20,3 +20,27 @@ export function getBackend(): DbBackend {
 export function isPostgres(): boolean {
   return getBackend() === 'postgres';
 }
+
+/**
+ * Where the host reads config tables (agent_groups, messaging_groups,
+ * messaging_group_agents, users, roles, members, destinations). Independent
+ * of the DB backend: an install can run Postgres for runtime state while
+ * still using a DB-resident config (uncommon), or SQLite for runtime with
+ * CRD-resident config (theoretically possible). The typical declarative
+ * deployment uses 'postgres' + 'crd' together.
+ *
+ * Selection precedence:
+ *   1. NANOCLAW_CONFIG_SOURCE env (db | crd)
+ *   2. Default 'db' (legacy install)
+ */
+export type ConfigSource = 'db' | 'crd';
+
+export function getConfigSource(): ConfigSource {
+  const v = process.env.NANOCLAW_CONFIG_SOURCE?.toLowerCase();
+  if (v === 'crd' || v === 'kubernetes' || v === 'k8s') return 'crd';
+  return 'db';
+}
+
+export function isCrdConfig(): boolean {
+  return getConfigSource() === 'crd';
+}

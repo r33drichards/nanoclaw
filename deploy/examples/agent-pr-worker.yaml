@@ -43,10 +43,9 @@ spec:
   messagingGroupRef: pr-factory-discord
   agentRef: pr-worker
   sessionMode: per-thread
-  responseScope: triggered
-  triggerRules:
-    pattern: "@pr-worker"
-    mentionOnly: false
+  engageMode: mention
+  senderScope: all
+  ignoredMessagePolicy: accumulate
   priority: 100
 ---
 apiVersion: nanoclaw.io/v1alpha1

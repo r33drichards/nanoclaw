@@ -33,21 +33,25 @@ spec:
                   description: NanoAgent name (same namespace).
                 sessionMode:
                   type: string
-                  enum: [shared, per-thread, per-user]
+                  enum: [shared, per-thread, agent-shared]
                   default: shared
-                responseScope:
+                engageMode:
                   type: string
-                  enum: [all, triggered]
+                  enum: [pattern, mention, mention-sticky]
+                  default: mention
+                engagePattern:
+                  type: string
+                  description: |
+                    Regex source string used when engageMode=pattern.
+                    `.` matches every message. Ignored for mention modes.
+                senderScope:
+                  type: string
+                  enum: [all, known]
                   default: all
-                triggerRules:
-                  type: object
-                  properties:
-                    pattern:
-                      type: string
-                      description: Regex / substring matched against inbound text.
-                    mentionOnly:
-                      type: boolean
-                      default: false
+                ignoredMessagePolicy:
+                  type: string
+                  enum: [drop, accumulate]
+                  default: accumulate
                 priority:
                   type: integer
                   minimum: 0

@@ -1,7 +1,13 @@
+import { getAgentInformer, projectAgentGroup } from '../crds/index.js';
 import type { AgentGroup } from '../types.js';
+
+import { isCrdConfig } from './backend.js';
 import { getDb } from './connection.js';
 
 export function createAgentGroup(group: AgentGroup): void {
+  if (isCrdConfig()) {
+    throw new Error('Agent groups are immutable in CRD mode. Create a NanoAgent CR via kubectl/Helm instead.');
+  }
   getDb()
     .prepare(
       `INSERT INTO agent_groups (id, name, folder, agent_provider, created_at)
@@ -11,14 +17,28 @@ export function createAgentGroup(group: AgentGroup): void {
 }
 
 export function getAgentGroup(id: string): AgentGroup | undefined {
+  if (isCrdConfig()) {
+    const cr = getAgentInformer().get(id);
+    return cr ? projectAgentGroup(cr) : undefined;
+  }
   return getDb().prepare('SELECT * FROM agent_groups WHERE id = ?').get(id) as AgentGroup | undefined;
 }
 
 export function getAgentGroupByFolder(folder: string): AgentGroup | undefined {
+  if (isCrdConfig()) {
+    // CRD mode reuses NanoAgent.metadata.name as the folder slug.
+    return getAgentGroup(folder);
+  }
   return getDb().prepare('SELECT * FROM agent_groups WHERE folder = ?').get(folder) as AgentGroup | undefined;
 }
 
 export function getAllAgentGroups(): AgentGroup[] {
+  if (isCrdConfig()) {
+    return getAgentInformer()
+      .list()
+      .map(projectAgentGroup)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
   return getDb().prepare('SELECT * FROM agent_groups ORDER BY name').all() as AgentGroup[];
 }
 

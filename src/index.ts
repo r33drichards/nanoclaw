@@ -10,8 +10,11 @@ import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { DATA_DIR } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
+import { startCrdInformers, stopCrdInformers } from './crds/index.js';
+import { getBackend, isCrdConfig, isPostgres } from './db/backend.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
+import { closePg, initPg, runPgMigrations } from './db/postgres.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
@@ -69,22 +72,52 @@ async function main(): Promise<void> {
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
-  // 1. Init central DB
-  const dbPath = path.join(DATA_DIR, 'v2.db');
-  const db = initDb(dbPath);
-  runMigrations(db);
-  log.info('Central DB ready', { path: dbPath });
+  // 1. Init central data store (SQLite or Postgres).
+  const backend = getBackend();
+  const configSource = isCrdConfig() ? 'crd' : 'db';
+  log.info('Selected backends', { db: backend, config: configSource });
+
+  if (backend === 'sqlite' && configSource === 'crd') {
+    // No supported reason to combine them — the declarative config CRDs
+    // live in k8s, so the host is running in-cluster, which means
+    // Postgres should be reachable too.
+    log.warn('NANOCLAW_CONFIG_SOURCE=crd with NANOCLAW_DB_BACKEND=sqlite is unsupported');
+  }
+
+  if (backend === 'postgres') {
+    await initPg();
+    await runPgMigrations();
+    log.info('Postgres ready');
+  } else {
+    const dbPath = path.join(DATA_DIR, 'v2.db');
+    const db = initDb(dbPath);
+    runMigrations(db);
+    log.info('Central DB ready', { path: dbPath });
+  }
+
+  // 1a. Start CRD informers (declarative config mode only).
+  if (configSource === 'crd') {
+    await startCrdInformers();
+  }
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
-  backfillContainerConfigs();
+  // SQLite-only: declarative mode reads the CRD instead.
+  if (backend === 'sqlite' && configSource === 'db') {
+    backfillContainerConfigs();
+  }
 
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
-  migrateGroupsToClaudeLocal();
+  if (configSource === 'db') {
+    migrateGroupsToClaudeLocal();
+  }
 
-  // 2. Container runtime
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
+  // 2. Container runtime — Docker only. In declarative k8s mode the
+  // controller spawns Sandbox pods; the host doesn't shell out to docker.
+  if (configSource === 'db') {
+    ensureContainerRuntimeRunning();
+    cleanupOrphans();
+  }
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
@@ -193,6 +226,14 @@ async function shutdown(signal: string): Promise<void> {
   stopDeliveryPolls();
   stopHostSweep();
   await stopCliServer();
+  stopCrdInformers();
+  if (isPostgres()) {
+    try {
+      await closePg();
+    } catch (err) {
+      log.error('closePg failed', { err });
+    }
+  }
   try {
     await teardownChannelAdapters();
   } finally {

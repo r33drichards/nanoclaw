@@ -1,0 +1,86 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nanomessaginggroups.nanoclaw.io
+spec:
+  group: nanoclaw.io
+  scope: Namespaced
+  names:
+    kind: NanoMessagingGroup
+    listKind: NanoMessagingGroupList
+    plural: nanomessaginggroups
+    singular: nanomessaginggroup
+    shortNames:
+      - nmg
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [channelType, platformId]
+              properties:
+                channelType:
+                  type: string
+                  description: |
+                    Channel adapter id (discord, slack, telegram, signal, …).
+                    Must match a registered adapter in the host.
+                platformId:
+                  type: string
+                  description: |
+                    Platform-native identifier — channel/chat/conversation id.
+                name:
+                  type: string
+                isGroup:
+                  type: boolean
+                  default: false
+                unknownSenderPolicy:
+                  type: string
+                  enum: [strict, request_approval, public]
+                  default: strict
+            status:
+              type: object
+              properties:
+                pendingSenderApprovals:
+                  type: integer
+                  description: |
+                    Count of unknown-sender approval requests waiting on this
+                    group. Updated by the host via status subresource.
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Channel
+          type: string
+          jsonPath: .spec.channelType
+        - name: Platform
+          type: string
+          jsonPath: .spec.platformId
+        - name: Policy
+          type: string
+          jsonPath: .spec.unknownSenderPolicy
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

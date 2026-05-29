@@ -1,0 +1,60 @@
+---
+apiVersion: nanoclaw.io/v1alpha1
+kind: NanoAgent
+metadata:
+  name: pr-worker
+spec:
+  displayName: "PR Worker"
+  provider: claude
+  model: claude-opus-4-7
+  effort: high
+  assistantName: "PR Worker"
+  maxMessagesPerPrompt: 10
+  skills: all
+  imageTag: ghcr.io/r33drichards/nanoclaw-agent:2.0.70
+  mcpServers:
+    github:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      instructions: |
+        Use this server to read PRs, leave comments, and inspect CI.
+  destinations: []
+  warmPool:
+    replicas: 1
+  allowedEgress:
+    - api.github.com
+---
+apiVersion: nanoclaw.io/v1alpha1
+kind: NanoMessagingGroup
+metadata:
+  name: pr-factory-discord
+spec:
+  channelType: discord
+  platformId: "987654321"
+  name: "PR Factory"
+  isGroup: true
+  unknownSenderPolicy: strict
+---
+apiVersion: nanoclaw.io/v1alpha1
+kind: NanoWiring
+metadata:
+  name: pr-factory-worker
+spec:
+  messagingGroupRef: pr-factory-discord
+  agentRef: pr-worker
+  sessionMode: per-thread
+  engageMode: mention
+  senderScope: all
+  ignoredMessagePolicy: accumulate
+  priority: 100
+---
+apiVersion: nanoclaw.io/v1alpha1
+kind: NanoUser
+metadata:
+  name: operator-discord-12345
+spec:
+  identity: "discord:12345"
+  kind: user
+  displayName: "Operator"
+  roles:
+    - role: owner

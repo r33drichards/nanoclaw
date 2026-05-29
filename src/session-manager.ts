@@ -18,6 +18,8 @@ import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
+import { isPostgres } from './db/backend.js';
+import { insertInboundMessage, upsertSessionRouting as upsertSessionRoutingPg } from './db/messages-in-host-pg.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
@@ -153,10 +155,7 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
  * writeDestinations() (when installed) so the latest routing is always in
  * place, including after admin rewiring.
  */
-export function writeSessionRouting(agentGroupId: string, sessionId: string): void {
-  const dbPath = inboundDbPath(agentGroupId, sessionId);
-  if (!fs.existsSync(dbPath)) return;
-
+export async function writeSessionRouting(agentGroupId: string, sessionId: string): Promise<void> {
   const session = getSession(sessionId);
   if (!session) return;
 
@@ -169,6 +168,19 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
       platformId = mg.platform_id;
     }
   }
+
+  if (isPostgres()) {
+    await upsertSessionRoutingPg(sessionId, {
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: session.thread_id,
+    });
+    log.debug('Session routing written (pg)', { sessionId, channelType, platformId, threadId: session.thread_id });
+    return;
+  }
+
+  const dbPath = inboundDbPath(agentGroupId, sessionId);
+  if (!fs.existsSync(dbPath)) return;
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
@@ -190,7 +202,17 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
  * long-lived connection — see the "Cross-mount visibility invariants" note
  * at the top of this file.
  */
-export function writeSessionMessage(
+/**
+ * Insert an inbound message for the agent.
+ *
+ * Returns a Promise so the Postgres backend can run async — the SQLite
+ * backend resolves synchronously. Callers in async contexts simply
+ * `await`; the few sync callers that remain wrap the call in
+ * `void writeSessionMessage(...)` and accept fire-and-forget
+ * semantics (they were already non-blocking on durability grounds, see
+ * router.ts inline comments).
+ */
+export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
   message: {
@@ -222,9 +244,28 @@ export function writeSessionMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
+): Promise<void> {
   // Extract base64 attachment data, save to inbox, replace with file paths
   const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
+
+  if (isPostgres()) {
+    await insertInboundMessage(sessionId, {
+      id: message.id,
+      kind: message.kind,
+      timestamp: message.timestamp,
+      platform_id: message.platformId ?? null,
+      channel_type: message.channelType ?? null,
+      thread_id: message.threadId ?? null,
+      content,
+      process_after: message.processAfter ?? null,
+      recurrence: message.recurrence ?? null,
+      trigger: message.trigger ?? 1,
+      source_session_id: message.sourceSessionId ?? null,
+      on_wake: (message.onWake ?? 0) === 1,
+    });
+    updateSession(sessionId, { last_active: new Date().toISOString() });
+    return;
+  }
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
@@ -379,7 +420,7 @@ export function openOutboundDbRw(agentGroupId: string, sessionId: string): Datab
  * loop picks it up. Used by the command gate to send denial responses
  * without waking a container.
  */
-export function writeOutboundDirect(
+export async function writeOutboundDirect(
   agentGroupId: string,
   sessionId: string,
   message: {
@@ -390,7 +431,51 @@ export function writeOutboundDirect(
     threadId: string | null;
     content: string;
   },
-): void {
+): Promise<void> {
+  if (isPostgres()) {
+    // Host has a narrow INSERT grant on messages_out (see
+    // deploy/postgres/30-grants.sql). Seq follows host parity (even);
+    // the agent-side writer keeps odd parity intact even if it races.
+    const { getPgPool } = await import('./db/postgres.js');
+    const client = await getPgPool().connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`ncl-session-${sessionId}`]);
+      const { rows } = await client.query<{ max: number }>(
+        `SELECT GREATEST(
+                  COALESCE((SELECT MAX(seq) FROM messages_in  WHERE session_id = $1), 0),
+                  COALESCE((SELECT MAX(seq) FROM messages_out WHERE session_id = $1), 0)
+                ) AS max`,
+        [sessionId],
+      );
+      const max = Number(rows[0]?.max ?? 0);
+      const nextSeq = max < 2 ? 2 : max + 2 - (max % 2);
+      await client.query(
+        `INSERT INTO messages_out
+           (session_id, id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
+         VALUES ($1, $2, $3, now(), $4, $5, $6, $7, $8::jsonb)
+         ON CONFLICT (session_id, id) DO NOTHING`,
+        [
+          sessionId,
+          message.id,
+          nextSeq,
+          message.kind,
+          message.platformId,
+          message.channelType,
+          message.threadId,
+          message.content,
+        ],
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   const db = openOutboundDb(agentGroupId, sessionId);
   try {
     db.prepare(
@@ -410,14 +495,14 @@ export function openSessionDb(agentGroupId: string, sessionId: string): Database
 }
 
 /** Write a system response to a session's inbound.db so the container's findQuestionResponse() picks it up. */
-export function writeSystemResponse(
+export async function writeSystemResponse(
   agentGroupId: string,
   sessionId: string,
   requestId: string,
   status: string,
   result: Record<string, unknown>,
-): void {
-  writeSessionMessage(agentGroupId, sessionId, {
+): Promise<void> {
+  await writeSessionMessage(agentGroupId, sessionId, {
     id: `sys-resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'system',
     timestamp: new Date().toISOString(),

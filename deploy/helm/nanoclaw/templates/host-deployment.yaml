@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-host
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: host
+spec:
+  replicas: {{ .Values.host.replicas }}
+  strategy:
+    {{- toYaml .Values.host.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "nanoclaw.host.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nanoclaw.host.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.hostName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: host
+          image: "{{ .Values.images.host.repository }}:{{ .Values.images.host.tag }}"
+          imagePullPolicy: {{ .Values.images.host.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: webhook
+              containerPort: 8081
+          env:
+            - name: PGHOST
+              value: {{ include "nanoclaw.postgres.host" . | quote }}
+            - name: PGPORT
+              value: {{ include "nanoclaw.postgres.port" . | quote }}
+            - name: PGDATABASE
+              value: {{ include "nanoclaw.postgres.database" . | quote }}
+            - name: PGUSER
+              value: nanoclaw_host
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-pg-app" .Values.postgres.cluster.name) .Values.postgres.external.secretName }}
+                  key: password
+            - name: ONECLI_URL
+              value: "http://{{ .Release.Name }}-onecli:{{ .Values.onecli.service.port }}"
+            {{- range $k, $v := .Values.host.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          envFrom:
+            {{- with .Values.host.channelSecretRef }}
+            - secretRef:
+                name: {{ . }}
+                optional: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.host.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.host.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.host.readinessProbe | nindent 12 }}

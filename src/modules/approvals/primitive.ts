@@ -126,8 +126,8 @@ function channelTypeOf(userId: string): string {
 // ── Request API ──
 
 /** Send a system chat to the agent's session. Used by callers and by the response handler. */
-export function notifyAgent(session: Session, text: string): void {
-  writeSessionMessage(session.agent_group_id, session.id, {
+export async function notifyAgent(session: Session, text: string): Promise<void> {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
@@ -166,7 +166,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
 
   const approvers = pickApprover(session.agent_group_id);
   if (approvers.length === 0) {
-    notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
+    await notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
     return;
   }
 
@@ -176,7 +176,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
 
   const target = await pickApprovalDelivery(approvers, originChannelType);
   if (!target) {
-    notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
+    await notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
     return;
   }
 
@@ -211,7 +211,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       );
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });
-      notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
+      await notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
       return;
     }
   }

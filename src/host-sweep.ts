@@ -29,8 +29,19 @@
 import type Database from 'better-sqlite3';
 import fs from 'fs';
 
-import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { isPostgres } from './db/backend.js';
+import {
+  countDueMessagesPg,
+  deleteOrphanProcessingClaimsPg,
+  getContainerStatePg,
+  getMessageForRetryPg,
+  getProcessingClaimsPg,
+  heartbeatAgeMsPg,
+  markMessageFailedPg,
+  retryWithBackoffPg,
+  syncProcessingAcksPg,
+} from './db/host-sweep-pg.js';
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
@@ -42,8 +53,9 @@ import {
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
+import { getActiveSessions } from './db/sessions.js';
 import { log } from './log.js';
-import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
+import { heartbeatPath, inboundDbPath, openInboundDb, openOutboundDb, openOutboundDbRw } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
 
@@ -148,6 +160,11 @@ async function sweepSession(session: Session): Promise<void> {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
+  if (isPostgres()) {
+    await sweepSessionPg(session, agentGroup.id);
+    return;
+  }
+
   const inPath = inboundDbPath(agentGroup.id, session.id);
   if (!fs.existsSync(inPath)) return;
 
@@ -208,6 +225,123 @@ async function sweepSession(session: Session): Promise<void> {
   } finally {
     inDb.close();
     outDb?.close();
+  }
+}
+
+/**
+ * Postgres-backed sweep for a single session. Mirrors the SQLite path
+ * step-for-step against the unified declarative schema:
+ *   1. sync processing_acks → messages_in.status
+ *   2. wake container if dueCount > 0 and not running
+ *   3. SLA enforcement on running container (ceiling + claim-stuck)
+ *   4. crashed-container processing-row reset
+ *   5. recurrence handler (shared with SQLite path — module-installed,
+ *      currently SQLite-only; PG support follows once the scheduling
+ *      module's db.ts is ported).
+ */
+async function sweepSessionPg(session: Session, agentGroupId: string): Promise<void> {
+  // 1. processing_ack → messages_in.status sync
+  await syncProcessingAcksPg(session.id);
+
+  // 2. wake if work is due and nothing is running
+  const dueCount = await countDueMessagesPg(session.id);
+  if (dueCount > 0 && !isContainerRunning(session.id)) {
+    log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
+    await wakeContainer(session);
+  }
+
+  const alive = isContainerRunning(session.id);
+
+  // 3. running-container SLA: ceiling + per-claim stuck
+  if (alive) {
+    await enforceRunningContainerSlaPg(session, agentGroupId);
+  }
+
+  // 4. crashed-container cleanup
+  if (!alive) {
+    await resetStuckProcessingRowsPg(session, 'container not running');
+  }
+
+  // 5. recurrence fanout — the scheduling module still drives this off the
+  // inbound.db Database handle in SQLite mode. Skip for PG mode until the
+  // module's db.ts gets its Postgres port. Recurrence is opt-in and not
+  // load-bearing for the happy-path declarative flow.
+}
+
+async function enforceRunningContainerSlaPg(session: Session, agentGroupId: string): Promise<void> {
+  const ageMs = await heartbeatAgeMsPg(session.id);
+  const containerState = await getContainerStatePg(session.id);
+  const claims = await getProcessingClaimsPg(session.id);
+
+  const decision = decideStuckAction({
+    now: Date.now(),
+    // null age (no heartbeat row yet) is encoded as 0 — matches the SQLite
+    // "absent file" semantics in decideStuckAction (ceiling skipped).
+    heartbeatMtimeMs: ageMs === null ? 0 : Date.now() - ageMs,
+    containerState,
+    claims: claims.map((c) => ({ message_id: c.message_id, status_changed: c.status_changed })),
+  });
+
+  if (decision.action === 'ok') return;
+
+  if (decision.action === 'kill-ceiling') {
+    log.warn('Killing container past absolute ceiling', {
+      sessionId: session.id,
+      heartbeatAgeMs: decision.heartbeatAgeMs,
+      ceilingMs: decision.ceilingMs,
+    });
+    killContainer(session.id, 'absolute-ceiling');
+    await resetStuckProcessingRowsPg(session, 'absolute-ceiling');
+    return;
+  }
+
+  log.warn('Killing container — message claimed then silent', {
+    sessionId: session.id,
+    messageId: decision.messageId,
+    claimAgeMs: decision.claimAgeMs,
+    toleranceMs: decision.toleranceMs,
+  });
+  killContainer(session.id, 'claim-stuck');
+  await resetStuckProcessingRowsPg(session, 'claim-stuck');
+}
+
+async function resetStuckProcessingRowsPg(session: Session, reason: string): Promise<void> {
+  const claims = await getProcessingClaimsPg(session.id);
+  const now = Date.now();
+  for (const { message_id } of claims) {
+    const msg = await getMessageForRetryPg(session.id, message_id);
+    if (!msg) continue;
+
+    // Already rescheduled for a future retry — skip.
+    if (msg.process_after && parseSqliteUtc(msg.process_after) > now) continue;
+
+    if (msg.tries >= MAX_TRIES) {
+      await markMessageFailedPg(session.id, msg.id);
+      log.warn('Message marked as failed after max retries', {
+        messageId: msg.id,
+        sessionId: session.id,
+        reason,
+      });
+    } else {
+      const backoffMs = BACKOFF_BASE_MS * Math.pow(2, msg.tries);
+      const backoffSec = Math.floor(backoffMs / 1000);
+      await retryWithBackoffPg(session.id, msg.id, backoffSec);
+      log.info('Reset stale message with backoff', {
+        messageId: msg.id,
+        tries: msg.tries,
+        backoffMs,
+        reason,
+      });
+    }
+  }
+
+  try {
+    const cleared = await deleteOrphanProcessingClaimsPg(session.id);
+    if (cleared > 0) {
+      log.info('Cleared orphan processing claims', { sessionId: session.id, cleared, reason });
+    }
+  } catch (err) {
+    log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
   }
 }
 

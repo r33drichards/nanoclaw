@@ -1,0 +1,96 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nanowirings.nanoclaw.io
+spec:
+  group: nanoclaw.io
+  scope: Namespaced
+  names:
+    kind: NanoWiring
+    listKind: NanoWiringList
+    plural: nanowirings
+    singular: nanowiring
+    shortNames:
+      - nw
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [messagingGroupRef, agentRef]
+              properties:
+                messagingGroupRef:
+                  type: string
+                  description: NanoMessagingGroup name (same namespace).
+                agentRef:
+                  type: string
+                  description: NanoAgent name (same namespace).
+                sessionMode:
+                  type: string
+                  enum: [shared, per-thread, agent-shared]
+                  default: shared
+                engageMode:
+                  type: string
+                  enum: [pattern, mention, mention-sticky]
+                  default: mention
+                engagePattern:
+                  type: string
+                  description: |
+                    Regex source string used when engageMode=pattern.
+                    `.` matches every message. Ignored for mention modes.
+                senderScope:
+                  type: string
+                  enum: [all, known]
+                  default: all
+                ignoredMessagePolicy:
+                  type: string
+                  enum: [drop, accumulate]
+                  default: accumulate
+                priority:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                  description: |
+                    Tiebreaker when multiple wirings match. Highest wins.
+            status:
+              type: object
+              properties:
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Messaging
+          type: string
+          jsonPath: .spec.messagingGroupRef
+        - name: Agent
+          type: string
+          jsonPath: .spec.agentRef
+        - name: Mode
+          type: string
+          jsonPath: .spec.sessionMode
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

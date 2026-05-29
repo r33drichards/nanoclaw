@@ -1,0 +1,80 @@
+{{- if .Values.controller.networkPolicy.managed }}
+# Default-deny ingress + egress for the namespace's Sandbox pods. The
+# controller authors per-NanoAgent NetworkPolicies that extend the allow
+# list (OneCLI, Postgres, + NanoAgent.spec.allowedEgress).
+#
+# This baseline runs unconditionally so an in-progress Sandbox without an
+# agent-specific policy yet cannot exfiltrate. Once the controller stamps
+# the per-agent policy, the additional rules merge in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-sandbox-default-deny
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      agents.x-k8s.io/sandbox: "true"
+  policyTypes: [Ingress, Egress]
+  egress:
+    # Always allow DNS so service resolution works.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if .Values.controller.networkPolicy.allowOneCli }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nanoclaw
+              app.kubernetes.io/component: onecli
+      ports:
+        - protocol: TCP
+          port: {{ .Values.onecli.service.port }}
+    {{- end }}
+    {{- if and .Values.controller.networkPolicy.allowPostgres (not .Values.postgres.external.host) }}
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ .Values.postgres.cluster.name }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+  ingress:
+    # Host needs to reach the agent-runner's healthz (if exposed) and the
+    # controller needs to inspect Sandboxes. Allow same-namespace ingress
+    # from host and controller service accounts only.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nanoclaw
+              app.kubernetes.io/component: host
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nanoclaw
+              app.kubernetes.io/component: controller
+---
+# Host outbound: needs to reach Postgres, OneCLI, the k8s API, DNS, and
+# the public internet (channel adapters call out to Discord / Slack / …).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-host-egress
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nanoclaw.host.selectorLabels" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - {}  # Channel adapters reach public platforms; intentional broad allow.
+{{- end }}

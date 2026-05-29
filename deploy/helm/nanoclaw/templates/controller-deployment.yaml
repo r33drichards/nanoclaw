@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-controller
+  labels:
+    {{- include "nanoclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nanoclaw.controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nanoclaw.controller.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.controllerName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.images.controller.repository }}:{{ .Values.images.controller.tag }}"
+          imagePullPolicy: {{ .Values.images.controller.pullPolicy }}
+          args:
+            - --leader-elect
+            - --namespace={{ .Release.Namespace }}
+            - --default-agent-image={{ .Values.images.agent.repository }}:{{ .Values.images.agent.tag }}
+            - --onecli-service={{ .Release.Name }}-onecli
+            - --postgres-host={{ include "nanoclaw.postgres.host" . }}
+            {{- if .Values.controller.networkPolicy.managed }}
+            - --network-policy-managed
+            {{- end }}
+            {{- if .Values.controller.networkPolicy.allowOneCli }}
+            - --allow-egress-onecli
+            {{- end }}
+            {{- if .Values.controller.networkPolicy.allowPostgres }}
+            - --allow-egress-postgres
+            {{- end }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}

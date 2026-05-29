@@ -1,0 +1,92 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nanosessions.nanoclaw.io
+spec:
+  group: nanoclaw.io
+  scope: Namespaced
+  names:
+    kind: NanoSession
+    listKind: NanoSessionList
+    plural: nanosessions
+    singular: nanosession
+    shortNames:
+      - ns
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              description: |
+                NanoSession spec is intentionally minimal — sessions are
+                runtime state, not declarative intent. The spec only carries
+                routing identity; everything else lives in the Postgres
+                `sessions` row (and downstream message tables).
+              required: [agentRef, messagingGroupRef]
+              properties:
+                agentRef:
+                  type: string
+                messagingGroupRef:
+                  type: string
+                threadId:
+                  type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Active, Idle, Completed, Failed]
+                sandboxClaimRef:
+                  type: string
+                lastActive:
+                  type: string
+                  format: date-time
+                pendingMessages:
+                  type: integer
+                  description: |
+                    Count of `messages_in` rows in 'pending' status. Updated
+                    by the host's status writer (LISTEN-driven).
+                pendingQuestions:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Agent
+          type: string
+          jsonPath: .spec.agentRef
+        - name: Messaging
+          type: string
+          jsonPath: .spec.messagingGroupRef
+        - name: Pending
+          type: integer
+          jsonPath: .status.pendingMessages
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
